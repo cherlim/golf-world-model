@@ -9,10 +9,10 @@ import streamlit as st
 from simulator import CLUBS, simulate_shot
 
 
-st.title("Golf World Model Demo — Version 0.3")
+st.title("Golf World Model Demo — Version 0.4")
 
 st.write(
-    "This demo shows a simple world model: current state + action → predicted futures → decision recommendation."
+    "This demo shows a simple world model: current state + action → predicted futures → distance-to-pin evaluation → decision recommendation."
 )
 
 with open(Path("course.json"), "r") as f:
@@ -57,21 +57,29 @@ def evaluate_club(club):
     shots = [simulate_shot(club, aim, wind) for _ in range(num_shots)]
     outcomes = [classify_shot(x, y) for x, y in shots]
 
+    pin = course["green"]["center"]
+    distances_to_pin = [distance([x, y], pin) for x, y in shots]
+    avg_distance_to_pin = sum(distances_to_pin) / len(distances_to_pin)
+
     green = outcomes.count("Green") / num_shots
     fairway = outcomes.count("Fairway") / num_shots
     rough = outcomes.count("Rough") / num_shots
     bunker = outcomes.count("Bunker") / num_shots
     water = outcomes.count("Water") / num_shots
-
     hazard = bunker + water
 
-    # Simple utility score
+    # Version 0.4 utility score:
+    # Reward being close to the pin.
+    # Reward green/fairway.
+    # Penalize hazards strongly.
     score = (
-        green * 100
-        + fairway * 60
-        + rough * 20
-        - bunker * 40
-        - water * 80
+        120
+        - avg_distance_to_pin
+        + green * 80
+        + fairway * 25
+        - rough * 10
+        - bunker * 50
+        - water * 100
     )
 
     return {
@@ -83,6 +91,7 @@ def evaluate_club(club):
         "bunker": bunker,
         "water": water,
         "hazard": hazard,
+        "avg_distance_to_pin": avg_distance_to_pin,
         "score": score,
     }
 
@@ -98,11 +107,11 @@ st.write(
     f"""
 The world model simulated **{num_shots} possible futures** for each club.
 
-It recommends **{best['club']}** because it has the best balance of:
-- green probability
-- fairway probability
+It now recommends **{best['club']}** by considering:
+- probability of reaching the green
+- probability of staying on the fairway
 - hazard risk
-- overall expected outcome
+- average distance to the pin
 """
 )
 
@@ -119,6 +128,7 @@ for r in results:
             "Bunker": f"{r['bunker']:.1%}",
             "Water": f"{r['water']:.1%}",
             "Hazard": f"{r['hazard']:.1%}",
+            "Avg Dist to Pin": round(r["avg_distance_to_pin"], 1),
             "Score": round(r["score"], 1),
         }
     )
@@ -189,8 +199,9 @@ xs = [s[0] for s in shots]
 ys = [s[1] for s in shots]
 ax.scatter(xs, ys, s=20, alpha=0.7)
 
-ax.scatter([320], [0], marker="*", s=250)
-ax.text(323, 3, "Pin")
+pin = course["green"]["center"]
+ax.scatter([pin[0]], [pin[1]], marker="*", s=250)
+ax.text(pin[0] + 3, pin[1] + 3, "Pin")
 
 ax.set_xlim(0, 360)
 ax.set_ylim(-80, 80)
@@ -204,17 +215,15 @@ st.pyplot(fig)
 st.subheader("World Model Interpretation")
 
 st.write(
-    f"""
-The model is no longer asking only:
+    """
+Version 0.4 improves the reward model.
 
-**What happens if I use one club?**
+The AI is no longer choosing the safest club only. It now asks:
 
-It is now asking:
+**Which action produces future states that are both safe and close to the target?**
 
-**What happens if I try each possible club, and which future is best?**
+This gives us a clearer world-model pattern:
 
-This is the key LeCun-style world-model pattern:
-
-**state → possible actions → predicted futures → evaluation → decision**
+**state → possible actions → predicted futures → reward evaluation → decision**
 """
 )
