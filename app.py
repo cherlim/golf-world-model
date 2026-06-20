@@ -9,18 +9,18 @@ import streamlit as st
 from simulator import CLUBS, simulate_shot
 
 
-st.title("Golf World Model Demo — Version 0.4")
+st.title("Golf World Model Demo — Version 0.5")
 
 st.write(
-    "This demo shows a simple world model: current state + action → predicted futures → distance-to-pin evaluation → decision recommendation."
+    "This version adds two-shot planning: the world model predicts not only the next shot, but also the best follow-up shot."
 )
 
 with open(Path("course.json"), "r") as f:
     course = json.load(f)
 
 wind = st.slider("Wind (-20 to 20)", -20, 20, 0)
-aim = st.slider("Aim Angle", -20, 20, 0)
-num_shots = st.slider("Number of simulated futures per club", 50, 500, 200)
+aim = st.slider("Aim Angle for First Shot", -20, 20, 0)
+num_shots = st.slider("Number of simulated futures per club", 50, 300, 150)
 
 
 def distance(p1, p2):
@@ -53,41 +53,40 @@ def classify_shot(x, y):
     return "Rough"
 
 
-def evaluate_club(club):
-    shots = [simulate_shot(club, aim, wind) for _ in range(num_shots)]
-    outcomes = [classify_shot(x, y) for x, y in shots]
+def simulate_from_position(start_x, start_y, club, aim_deg, wind):
+    dx, dy = simulate_shot(club, aim_deg, wind)
+    return start_x + dx, start_y + dy
 
+
+def evaluate_one_shot_from_position(start_x, start_y, club):
     pin = course["green"]["center"]
+
+    shots = [
+        simulate_from_position(start_x, start_y, club, 0, wind)
+        for _ in range(num_shots)
+    ]
+
+    outcomes = [classify_shot(x, y) for x, y in shots]
     distances_to_pin = [distance([x, y], pin) for x, y in shots]
     avg_distance_to_pin = sum(distances_to_pin) / len(distances_to_pin)
 
     green = outcomes.count("Green") / num_shots
-    fairway = outcomes.count("Fairway") / num_shots
-    rough = outcomes.count("Rough") / num_shots
     bunker = outcomes.count("Bunker") / num_shots
     water = outcomes.count("Water") / num_shots
     hazard = bunker + water
 
-    # Version 0.4 utility score:
-    # Reward being close to the pin.
-    # Reward green/fairway.
-    # Penalize hazards strongly.
     score = (
-        120
+        150
         - avg_distance_to_pin
-        + green * 80
-        + fairway * 25
-        - rough * 10
-        - bunker * 50
-        - water * 100
+        + green * 100
+        - bunker * 60
+        - water * 120
     )
 
     return {
         "club": club,
         "shots": shots,
         "green": green,
-        "fairway": fairway,
-        "rough": rough,
         "bunker": bunker,
         "water": water,
         "hazard": hazard,
@@ -96,53 +95,125 @@ def evaluate_club(club):
     }
 
 
-results = [evaluate_club(club) for club in CLUBS.keys()]
-best = max(results, key=lambda r: r["score"])
+def find_best_second_shot(start_x, start_y):
+    second_results = [
+        evaluate_one_shot_from_position(start_x, start_y, club)
+        for club in CLUBS.keys()
+    ]
+    return max(second_results, key=lambda r: r["score"])
 
-st.subheader("AI Recommendation")
 
-st.success(f"Recommended club: {best['club']}")
+def evaluate_two_shot_plan(first_club):
+    first_shots = [
+        simulate_from_position(0, 0, first_club, aim, wind)
+        for _ in range(num_shots)
+    ]
+
+    first_outcomes = [classify_shot(x, y) for x, y in first_shots]
+    first_water = first_outcomes.count("Water") / num_shots
+    first_bunker = first_outcomes.count("Bunker") / num_shots
+    first_hazard = first_water + first_bunker
+
+    second_club_choices = []
+    final_distances = []
+    final_green_probs = []
+    final_hazard_probs = []
+
+    for x, y in first_shots:
+        # If first shot is in water, apply a strong penalty by keeping distance high.
+        if classify_shot(x, y) == "Water":
+            second_club_choices.append("Penalty")
+            final_distances.append(999)
+            final_green_probs.append(0)
+            final_hazard_probs.append(1)
+            continue
+
+        best_second = find_best_second_shot(x, y)
+        second_club_choices.append(best_second["club"])
+        final_distances.append(best_second["avg_distance_to_pin"])
+        final_green_probs.append(best_second["green"])
+        final_hazard_probs.append(best_second["hazard"])
+
+    avg_final_distance = sum(final_distances) / len(final_distances)
+    avg_final_green = sum(final_green_probs) / len(final_green_probs)
+    avg_final_hazard = sum(final_hazard_probs) / len(final_hazard_probs)
+
+    most_common_second = max(
+        set(second_club_choices),
+        key=second_club_choices.count,
+    )
+
+    score = (
+        200
+        - avg_final_distance
+        + avg_final_green * 120
+        - first_hazard * 100
+        - avg_final_hazard * 80
+    )
+
+    return {
+        "first_club": first_club,
+        "best_second_club": most_common_second,
+        "first_hazard": first_hazard,
+        "avg_final_distance": avg_final_distance,
+        "avg_final_green": avg_final_green,
+        "avg_final_hazard": avg_final_hazard,
+        "score": score,
+        "first_shots": first_shots,
+    }
+
+
+plans = [evaluate_two_shot_plan(club) for club in CLUBS.keys()]
+best_plan = max(plans, key=lambda p: p["score"])
+
+st.subheader("AI Two-Shot Recommendation")
+
+st.success(
+    f"Recommended plan: {best_plan['first_club']} → {best_plan['best_second_club']}"
+)
 
 st.write(
     f"""
-The world model simulated **{num_shots} possible futures** for each club.
+The world model simulated **{num_shots} first-shot futures** for each club.
 
-It now recommends **{best['club']}** by considering:
-- probability of reaching the green
-- probability of staying on the fairway
-- hazard risk
-- average distance to the pin
+For each future position, it then searched for the best second shot.
+
+This means the model is no longer asking only:
+
+**What happens after one shot?**
+
+It is asking:
+
+**What happens after this shot, and what can I do next?**
 """
 )
 
-st.subheader("Action Comparison")
+st.subheader("Two-Shot Plan Comparison")
 
 table_data = []
-for r in results:
+for p in plans:
     table_data.append(
         {
-            "Club": r["club"],
-            "Green": f"{r['green']:.1%}",
-            "Fairway": f"{r['fairway']:.1%}",
-            "Rough": f"{r['rough']:.1%}",
-            "Bunker": f"{r['bunker']:.1%}",
-            "Water": f"{r['water']:.1%}",
-            "Hazard": f"{r['hazard']:.1%}",
-            "Avg Dist to Pin": round(r["avg_distance_to_pin"], 1),
-            "Score": round(r["score"], 1),
+            "First Club": p["first_club"],
+            "Best Second Club": p["best_second_club"],
+            "First Shot Hazard": f"{p['first_hazard']:.1%}",
+            "Final Green Prob": f"{p['avg_final_green']:.1%}",
+            "Final Hazard Prob": f"{p['avg_final_hazard']:.1%}",
+            "Avg Final Dist to Pin": round(p["avg_final_distance"], 1),
+            "Score": round(p["score"], 1),
         }
     )
 
 st.table(table_data)
 
-selected_club = st.selectbox(
-    "Choose a club to visualize",
+selected_first_club = st.selectbox(
+    "Choose first club to visualize",
     list(CLUBS.keys()),
-    index=list(CLUBS.keys()).index(best["club"]),
+    index=list(CLUBS.keys()).index(best_plan["first_club"]),
 )
 
-selected_result = next(r for r in results if r["club"] == selected_club)
-shots = selected_result["shots"]
+selected_plan = next(p for p in plans if p["first_club"] == selected_first_club)
+shots = selected_plan["first_shots"]
 
 fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -207,7 +278,7 @@ ax.set_xlim(0, 360)
 ax.set_ylim(-80, 80)
 ax.set_xlabel("Distance")
 ax.set_ylabel("Lateral Position")
-ax.set_title(f"Predicted Futures for {selected_club}")
+ax.set_title(f"First-Shot Futures for {selected_first_club}")
 ax.grid(True)
 
 st.pyplot(fig)
@@ -216,14 +287,12 @@ st.subheader("World Model Interpretation")
 
 st.write(
     """
-Version 0.4 improves the reward model.
+Version 0.5 demonstrates multi-step planning.
 
-The AI is no longer choosing the safest club only. It now asks:
+The model now follows this pattern:
 
-**Which action produces future states that are both safe and close to the target?**
+**current state → first action → predicted future state → second action → final predicted outcome**
 
-This gives us a clearer world-model pattern:
-
-**state → possible actions → predicted futures → reward evaluation → decision**
+This is closer to LeCun's world-model idea because the system is not merely reacting to the current situation. It is imagining future states and planning through them.
 """
 )
