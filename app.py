@@ -9,10 +9,10 @@ import streamlit as st
 from simulator import CLUBS, simulate_shot
 
 
-st.title("Golf World Model Demo — Version 0.5")
+st.title("Golf World Model Demo — Version 0.6")
 
 st.write(
-    "This version adds two-shot planning: the world model predicts not only the next shot, but also the best follow-up shot."
+    "This version adds golf-specific constraints, so the world model cannot choose unrealistic plans such as PW followed by Driver."
 )
 
 with open(Path("course.json"), "r") as f:
@@ -95,11 +95,37 @@ def evaluate_one_shot_from_position(start_x, start_y, club):
     }
 
 
+def allowed_second_clubs(start_x, start_y):
+    distance_to_pin = distance([start_x, start_y], course["green"]["center"])
+
+    allowed = []
+
+    for club in CLUBS.keys():
+        # Driver is only allowed from the tee / very long starting position
+        if club == "Driver":
+            continue
+
+        # PW is mainly for shorter approach shots
+        if club == "PW" and distance_to_pin > 130:
+            continue
+
+        # 9 Iron is not suitable for very long remaining distance
+        if club == "9 Iron" and distance_to_pin > 170:
+            continue
+
+        allowed.append(club)
+
+    return allowed
+
+
 def find_best_second_shot(start_x, start_y):
+    clubs = allowed_second_clubs(start_x, start_y)
+
     second_results = [
         evaluate_one_shot_from_position(start_x, start_y, club)
-        for club in CLUBS.keys()
+        for club in clubs
     ]
+
     return max(second_results, key=lambda r: r["score"])
 
 
