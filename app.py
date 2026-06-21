@@ -9,7 +9,7 @@ import streamlit as st
 from simulator import CLUBS, simulate_shot
 
 
-st.title("Golf World Model Demo — Version 0.6")
+st.title("Golf World Model Demo — Version 0.7B")
 
 st.write(
     "This version adds golf-specific constraints, so the world model cannot choose unrealistic plans such as PW followed by Driver."
@@ -240,6 +240,62 @@ selected_first_club = st.selectbox(
 
 selected_plan = next(p for p in plans if p["first_club"] == selected_first_club)
 shots = selected_plan["first_shots"]
+st.header("v0.7B Learned World Model")
+
+st.write(
+    "This compares the handcrafted simulator with a learned model trained from simulator-generated data."
+)
+
+try:
+    from learned_world_model import predict_learned_shot
+
+    # Use the mean of the handcrafted first-shot futures as simulator reference
+    # Use the mean of the handcrafted first-shot futures as simulator reference
+    simulator_landing_x = sum(s[0] for s in shots) / len(shots)
+    simulator_landing_y = sum(s[1] for s in shots) / len(shots)
+
+    # Current simplified starting state used by the training data
+    ball_x = 0
+    ball_y = 0
+    pin_x = course["green"]["center"][0]
+    pin_y = course["green"]["center"][1]
+
+    learned_result = predict_learned_shot(
+        ball_x,
+        ball_y,
+        pin_x,
+        pin_y,
+        selected_first_club,
+        aim,
+        wind,
+    )
+
+    learned_landing_x = learned_result["landing_x"]
+    learned_landing_y = learned_result["landing_y"]
+
+    error = (
+        (learned_landing_x - simulator_landing_x) ** 2
+        + (learned_landing_y - simulator_landing_y) ** 2
+    ) ** 0.5
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Simulator Landing X", f"{simulator_landing_x:.1f}")
+        st.metric("Simulator Landing Y", f"{simulator_landing_y:.1f}")
+
+    with col2:
+        st.metric("Learned Landing X", f"{learned_landing_x:.1f}")
+        st.metric("Learned Landing Y", f"{learned_landing_y:.1f}")
+
+    with col3:
+        st.metric("Prediction Error", f"{error:.1f} m")
+
+except FileNotFoundError:
+    st.warning("Learned model not found. Run: python train_world_model.py")
+
+except Exception as e:
+    st.error(f"Learned world model error: {e}")
 
 fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -313,12 +369,20 @@ st.subheader("World Model Interpretation")
 
 st.write(
     """
-Version 0.5 demonstrates multi-step planning.
+Version 0.7B demonstrates a learned world model.
 
-The model now follows this pattern:
+Training phase:
 
-**current state → first action → predicted future state → second action → final predicted outcome**
+**(current state, action) → future state**
 
-This is closer to LeCun's world-model idea because the system is not merely reacting to the current situation. It is imagining future states and planning through them.
+The simulator generates thousands of examples which are used to train a machine learning model.
+
+Inference phase:
+
+**current state → action → learned world model → predicted future state**
+
+The learned model can now predict future landing positions without directly running the simulator.
+
+This is an important step toward LeCun's world-model idea because future states are no longer generated only by handcrafted rules. The system learns an approximation of the world from experience.
 """
 )
